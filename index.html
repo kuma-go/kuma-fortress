@@ -1,4 +1,11 @@
 <!doctype html>
+<!--
+  KUMA FORTRESS — 쿠마의 요새 전쟁
+  Copyright (c) 2026 KUMA (https://github.com/kuma-go). All Rights Reserved.
+  본 게임의 코드·그래픽·디자인의 무단 복제, 수정, 재배포, 재호스팅을 금지합니다.
+  Unauthorized copying, modification, redistribution, or re-hosting is prohibited.
+  공식 배포처: https://kuma-go.github.io/kuma-fortress/
+-->
 <html lang="ko">
 <head>
 <meta charset="utf-8">
@@ -2962,6 +2969,7 @@ function showMenu(){
         <button class="btn small" id="mHelp">${STR.menuHelp}</button>
       </div>
       <div class="sub" style="text-align:center;margin:4px 0 0">⚑ ${cust.name} — ${cust.fort}</div>
+      <div class="sub" style="text-align:center;margin:8px 0 0;font-size:11px;opacity:.75">© 2026 KUMA · All Rights Reserved · 무단 복제/재배포 금지</div>
     </div>`);
   p.querySelector('#bearSlot').appendChild(bearIconCanvas(84,'#8a6a4a'));
   if(ADSENSE_CLIENT&&ADSENSE_SLOT){

@@ -21,9 +21,11 @@
 ![battle](preview-battle.png)
 ![castle](preview-castle.png)
 
-## 실행
+## 저작권
 
-`index.html` 하나가 게임 전부입니다. 더블클릭으로 로컬 실행하거나 아무 정적 호스팅에 올리면 됩니다.
+**© 2026 KUMA. All Rights Reserved.**
+이 게임은 오픈소스가 아닙니다. 공식 배포처(위 플레이 링크)에서의 플레이만 허용되며,
+코드·그래픽의 복제, 수정, 재배포, 타 사이트 재호스팅을 금지합니다. 자세한 내용은 [LICENSE.md](LICENSE.md) 참고.
 
 ---
 Made with ❤️ by [KUMA](https://github.com/kuma-go) — procedurally rendered, zero dependencies, single file.
