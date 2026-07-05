@@ -2370,6 +2370,21 @@ function drawParticles(parts){
       ctx.save(); ctx.globalCompositeOperation='lighter'; ctx.globalAlpha=lf;
       ctx.fillStyle=p.color;
       ctx.beginPath(); ctx.arc(sx,sy-(p.h||0)*10*z,p.size*z*lf,0,7); ctx.fill(); ctx.restore();
+    } else if(p.kind==='puff'){
+      ctx.save(); ctx.globalAlpha=clamp(p.life/p.maxLife,0,1)*.9;
+      ctx.fillStyle=p.color;
+      ctx.beginPath(); ctx.arc(sx,sy-(p.h||0)*10*z,p.size*z*(.7+(1-p.life/p.maxLife)*.8),0,7); ctx.fill();
+      ctx.strokeStyle='rgba(44,36,29,.45)'; ctx.lineWidth=1;
+      ctx.stroke(); ctx.restore();
+    } else if(p.kind==='slash'){
+      const tt=1-lf;
+      ctx.save(); ctx.translate(sx,sy-(p.h||0)*10*z);
+      ctx.rotate(p.ang||0); ctx.scale(z,z*.6);
+      ctx.strokeStyle='rgba(255,255,255,'+(.9*lf)+')'; ctx.lineWidth=2.4; ctx.lineCap='round';
+      ctx.beginPath(); ctx.arc(0,0,p.size||7,-1.2+tt*1.7,.5+tt*1.7); ctx.stroke();
+      ctx.strokeStyle='rgba(255,238,190,'+(.55*lf)+')'; ctx.lineWidth=1.1;
+      ctx.beginPath(); ctx.arc(0,0,(p.size||7)-2.4,-1.1+tt*1.7,.4+tt*1.7); ctx.stroke();
+      ctx.lineCap='butt'; ctx.restore();
     } else if(p.kind==='smoke'){
       ctx.save(); ctx.globalAlpha=lf*.4; ctx.fillStyle=p.color;
       ctx.beginPath(); ctx.arc(sx,sy-(p.h||0)*10*z,p.size*z*(1.6-lf*.9),0,7); ctx.fill(); ctx.restore();
@@ -3465,7 +3480,7 @@ function damageBuilding(b,amt){
   if(b.dead||b.kind==='moat'||b.kind==='flag')return;
   raiseAlarm(b.x+0.5,b.y+0.5); // garrison responds to attacks anywhere
   if(amt>=35) floatText(b.x+(b.kind==='hq'?1:.5),b.y+(b.kind==='hq'?1:.5),'-'+Math.round(amt),'#ffd070');
-  b.hp-=amt;
+  b.hp-=amt; b.hitT=.18;
   // stacked storeys crumble one at a time as the structure weakens
   if((b.kind==='wall'||b.kind==='block')&&(b.lvl||1)>1){
     while(b.lvl>1&&b.hp<=(b.lvlHp||b.maxHp)*(b.lvl-1)){
@@ -3497,7 +3512,7 @@ function damageBuilding(b,amt){
     if(b.kind==='wall'||b.kind==='block'||b.kind==='gate'||b.kind==='tower') collapseCheck(Battle.G,b.x,b.y);
   }
 }
-function damageUnit(u,amt,srcX,srcY,heavy){ if(u.hp<=0)return; u.hp-=amt;
+function damageUnit(u,amt,srcX,srcY,heavy){ if(u.hp<=0)return; u.hp-=amt; u.hitT=.16;
   if(amt>=24||u.hp<=0) floatText(u.x,u.y,'-'+Math.round(amt),u.hp<=0?'#ff8a70':'#ffe090');
   if(u.hp<=0){ u.hp=0;
     if(heavy&&srcX!==undefined&&Battle.parts.length<880){
@@ -3509,12 +3524,25 @@ function damageUnit(u,amt,srcX,srcY,heavy){ if(u.hp<=0)return; u.hp-=amt;
         spin:(Math.random()*10-5), color:u.color, uid:u.def.id, bounces:0,
         life:2.2, maxLife:2.2, size:5});
       boom(u.x,u.y,3,'#a04038',.4);
+      deathBurst(u);
     } else {
       stampDecal('corpse',u.x,u.y,1,u.color);
       boom(u.x,u.y,4,'#a04038',.5);
       Battle.parts.push({x:u.x,y:u.y,h:0,vx:0,vy:0,vh:0,kind:'smoke',color:'#3a3f45',
         life:.7,maxLife:.7,size:4});
+      deathBurst(u);
     } } }
+function deathBurst(u){ // 사망 연출: 임팩트 플래시 + 털·팀색 퍼프
+  if(Battle.parts.length>860)return;
+  Battle.parts.push({kind:'flash',x:u.x,y:u.y,h:.5,vx:0,vy:0,vh:0,
+    color:'#fff0d0',life:.13,maxLife:.13,size:8});
+  const n=BEAR_BIG[u.def.id]?7:5;
+  for(let i=0;i<n;i++) Battle.parts.push({kind:'puff',
+    x:u.x+(Math.random()-.5)*.3, y:u.y+(Math.random()-.5)*.3, h:.3+Math.random()*.4,
+    vx:(Math.random()-.5)*1.6, vy:(Math.random()-.5)*1.0, vh:.6+Math.random()*.9,
+    color:i%3===2?u.color:(i%3?'#976231':'#B27541'),
+    life:.5+Math.random()*.25, maxLife:.7, size:2.2+Math.random()*1.6});
+}
 function nearestWoundedAlly(u,allies,rad){
   let best=null, bd=rad;
   for(const a of allies){ if(a===u||a.hp<=0||a.hp>=a.maxHp)continue;
@@ -3727,7 +3755,7 @@ function simStep(dt){
     if(u.hp<=0)continue;
     u.slow=Math.max(0,u.slow-dt);
     u.suppression=Math.max(0,(u.suppression||0)-dt);
-    u.flash=Math.max(0,u.flash-dt*3);
+    u.flash=Math.max(0,u.flash-dt*3); u.hitT=Math.max(0,(u.hitT||0)-dt);
     u.atkT=Math.max(0,(u.atkT||0)-dt);
     u.repathCd=Math.max(0,u.repathCd-dt);
     const lab=Battle.mode==='lab';
@@ -3770,6 +3798,8 @@ function simStep(dt){
           fireProjectile(u.x,u.y,.14,tgt,{dmg:u.def.dmg, spl:u.def.spl, mw:u.def.mw, mb:u.def.mb, projSpeed:u.def.projSpeed, spread:u.def.spread}, false, u.def.proj); }
         else {
           u.atkT=.22; // melee swing
+          if(Battle.parts.length<880) Battle.parts.push({kind:'slash',x:tx,y:ty,h:.5,
+            ang:Math.atan2(ty-u.y,(tx-u.x)*1.6),vx:0,vy:0,vh:0,life:.17,maxLife:.17,size:7});
           if(isB) damageBuilding(tgt, u.def.dmg*(WALLISH[tgt.kind]?u.def.mw:u.def.mb));
           else damageUnit(tgt, u.def.dmg);
           if(u.def.spl>0) splashAt(tx,ty,u.def.spl,u.def.dmg*.5,false,u.def);
@@ -3827,7 +3857,7 @@ function simStep(dt){
   // --- defenders: alarm-driven garrison AI (reinforce, navigate, engage) ---
   for(const d of Battle.defenders){
     if(d.hp<=0)continue;
-    d.slow=0; d.suppression=Math.max(0,(d.suppression||0)-dt); d.flash=Math.max(0,(d.flash||0)-dt*3);
+    d.slow=0; d.suppression=Math.max(0,(d.suppression||0)-dt); d.flash=Math.max(0,(d.flash||0)-dt*3); d.hitT=Math.max(0,(d.hitT||0)-dt);
     d.atkT=Math.max(0,(d.atkT||0)-dt);
     d.repathCd=Math.max(0,(d.repathCd||0)-dt);
     const engageR=Battle.mode==='lab'?1e9:(alarmActive()?15:Math.max(d.def.rng+2.5,4.5));
@@ -3857,7 +3887,10 @@ function simStep(dt){
           if(d.suppression>0) d.cd*=SUPPRESS.reload;
           if(d.def.proj&&d.def.rng>1.2){ d.flash=.12;
             fireProjectile(d.x,d.y,.14,d.target,{dmg:d.def.dmg,spl:d.def.spl,projSpeed:d.def.projSpeed,spread:d.def.spread},true,d.def.proj); }
-          else { d.atkT=.22; damageUnit(d.target,d.def.dmg); AudioSys.play('hit'); } }
+          else { d.atkT=.22;
+            if(Battle.parts.length<880) Battle.parts.push({kind:'slash',x:d.target.x,y:d.target.y,h:.5,
+              ang:Math.atan2(d.target.y-d.y,(d.target.x-d.x)*1.6),vx:0,vy:0,vh:0,life:.17,maxLife:.17,size:7});
+            damageUnit(d.target,d.def.dmg); AudioSys.play('hit'); } }
         continue;
       }
       destX=d.target.x; destY=d.target.y;
@@ -3910,6 +3943,7 @@ function simStep(dt){
           kind:'smoke',color:'#3c4249',life:1.1,maxLife:1.1,size:3.5+Math.random()*2});
       }
     }
+    b.hitT=Math.max(0,(b.hitT||0)-dt);
     if(b.kind!=='tower'||b.dead)continue;
     b.flash=Math.max(0,b.flash-dt*3);
     const td=b.def;
@@ -5252,7 +5286,7 @@ function render(time){
   const items=[];
   for(const b of G.buildings){
     const flat=(b.kind==='moat')?-31:(b.kind==='bridgeB'||b.kind==='trap')?-30:(b.kind==='flag'?-0.4:0);
-    items.push({k:b.x+b.y+(b.kind==='hq'?1:0)+flat, f:()=>drawBuilding(b,time,G.cust)});
+    items.push({k:b.x+b.y+(b.kind==='hq'?1:0)+flat, f:()=>{drawBuilding(b,time,G.cust); if(b.hitT>0) drawBHit(b);}});
   }
   if(MODE==='build'){
     for(const gu of G.garrison){
@@ -5612,7 +5646,7 @@ const VDYN={
   howitzer:{x:8,y:-15.5,len:17,w:3.2,cap:2.6,elev:.32},
   fieldcannon:{x:0,y:-8,len:14,w:3.8,cap:2.6},
   siegegun:{x:0,y:-9,len:13,w:3.6},
-  bombard:{x:-1,y:-7,len:12,w:6},
+  bombard:{x:-2,y:-8.5,len:13.5,w:6,elev:.42,cap:3.4},
   gatlingGun:{x:1,y:-9,len:12,w:1.8,tri:1},
   mortarUnit:{x:1,y:-4,len:9.5,w:4.6,fixed:1.15},
   dragoon:{x:3,y:-16,len:9,w:1.7},
@@ -5769,7 +5803,7 @@ function drawBearUnit(g,era,uIdx,C){
     case 'catapult':{ // ← 유저 SVG: 목제 투석 수레 — 시안 액센트 + 허브휠, 곰 없음
       g.fillStyle='#774019'; g.beginPath(); // 기둥
       if(g.roundRect) g.roundRect(-2.6,-16,5.2,13,1.4); else g.rect(-2.6,-16,5.2,13); g.fill(); bOut(g,1.5);
-      g.fillStyle='#00B6EE'; g.beginPath(); // 시안 크로스바
+      g.fillStyle=C.c; g.beginPath(); // 시안 크로스바
       if(g.roundRect) g.roundRect(-12,-7.6,24,3.4,1.5); else g.rect(-12,-7.6,24,3.4); g.fill(); bOut(g,1.4);
       g.fillStyle='#774019'; g.beginPath(); // 베이스 빔
       if(g.roundRect) g.roundRect(-13,-4.4,26,4.6,1.5); else g.rect(-13,-4.4,26,4.6); g.fill(); bOut(g,1.5);
@@ -5801,6 +5835,86 @@ function drawBearUnit(g,era,uIdx,C){
       if(g.roundRect) g.roundRect(-4.2,-9,4.6,2.4,1.2); else g.rect(-4.2,-9,4.6,2.4); g.fill(); bOut(g,1.1);
       bearHeadC(g,-6.4,-14.5,4.6);
       bearHelm(g,'helm2',-6.4,-14.5,4.6);
+      break; }
+    case 'ram':{ // ← 유저 SVG: 곰발 공성추 — A프레임 + 매달린 통나무 + 곰발 램헤드
+      g.fillStyle='#774019'; g.beginPath(); // 상단 레일
+      if(g.roundRect) g.roundRect(-11.5,-21.6,21,3.2,1.4); else g.rect(-11.5,-21.6,21,3.2); g.fill(); bOut(g,1.4);
+      for(const cx of [-12.8,7.4]){ g.fillStyle='#AFAFAF'; g.beginPath(); // 강철 캡
+        if(g.roundRect) g.roundRect(cx,-22.7,4.6,4.6,1.4); else g.rect(cx,-22.7,4.6,4.6); g.fill(); bOut(g,1.3); }
+      g.fillStyle='#5B7589'; g.beginPath(); g.arc(-1,-20,1.9,0,7); g.fill(); bOut(g,1.1); // 레일 피벗
+      g.strokeStyle='#2C241D'; g.lineWidth=1.8; // 매달림 스트랩
+      g.beginPath(); g.moveTo(-8.6,-19.2); g.lineTo(-8.6,-11.4); g.moveTo(6.4,-19.2); g.lineTo(6.4,-11.4); g.stroke();
+      g.strokeStyle='#774019'; g.lineWidth=2.8; g.lineCap='round'; // A프레임
+      g.beginPath(); g.moveTo(-7.5,-6.6); g.lineTo(-2,-19.4); g.moveTo(3.5,-6.6); g.lineTo(-2,-19.4); g.stroke();
+      g.lineCap='butt';
+      g.fillStyle='#A16024'; g.beginPath(); // 램 통나무
+      if(g.roundRect) g.roundRect(-13.5,-13.6,25,4.6,2); else g.rect(-13.5,-13.6,25,4.6); g.fill(); bOut(g,1.5);
+      g.fillStyle='#AFAFAF'; g.beginPath(); // 후미 캡
+      if(g.roundRect) g.roundRect(-15.6,-14.3,3,6,1.2); else g.rect(-15.6,-14.3,3,6); g.fill(); bOut(g,1.3);
+      g.fillStyle='#D9D9D9'; g.beginPath(); g.arc(13.2,-11.3,3.9,0,7); g.fill(); bOut(g,1.4); // 곰발 램헤드
+      for(const t of [[16,-14.1,1.6],[17.6,-11.2,1.6],[16,-8.5,1.5]]){
+        g.fillStyle='#D9D9D9'; g.beginPath(); g.arc(t[0],t[1],t[2],0,7); g.fill(); bOut(g,1.1); }
+      g.fillStyle=C.c; g.beginPath(); // 시안 데크
+      if(g.roundRect) g.roundRect(-10.5,-7.8,21,3.2,1.5); else g.rect(-10.5,-7.8,21,3.2); g.fill(); bOut(g,1.4);
+      g.fillStyle='#774019'; g.beginPath(); // 베이스 빔
+      if(g.roundRect) g.roundRect(-11.5,-4.8,23,4.2,1.5); else g.rect(-11.5,-4.8,23,4.2); g.fill(); bOut(g,1.5);
+      for(const wx of [-7.5,7.5]){
+        g.fillStyle='#5B7589'; g.beginPath(); g.arc(wx,-1.2,3.6,0,7); g.fill();
+        g.strokeStyle='#2B2B2A'; g.lineWidth=1.5; g.stroke();
+        g.fillStyle='#E4E4E4'; g.beginPath(); g.arc(wx,-1.2,1.4,0,7); g.fill();
+        g.strokeStyle='#1D556E'; g.lineWidth=1; g.stroke(); }
+      break; }
+    case 'ballista':{ // ← 유저 SVG: X프레임 발리스타 — 대형 활대 + 강철 볼트
+      g.strokeStyle='#774019'; g.lineWidth=3; g.lineCap='round'; // X 프레임
+      g.beginPath(); g.moveTo(-6.5,-7.5); g.lineTo(4.5,-19.5); g.moveTo(4.5,-7.5); g.lineTo(-6.5,-19.5); g.stroke();
+      g.lineCap='butt';
+      g.strokeStyle='#2C241D'; g.lineWidth=1.3; // 시위: 활끝 → 후방 윈치
+      g.beginPath(); g.moveTo(9.8,-24.4); g.lineTo(-9,-16.1); g.lineTo(9.8,-7.6); g.stroke();
+      g.fillStyle='#AFAFAF'; g.beginPath(); // 볼트 샤프트
+      if(g.roundRect) g.roundRect(-9,-17.5,20,2.8,1.3); else g.rect(-9,-17.5,20,2.8); g.fill(); bOut(g,1.3);
+      g.fillStyle='#D9D9D9'; g.beginPath(); // 살촉
+      g.moveTo(17.6,-16.1); g.lineTo(11,-19.7); g.lineTo(11,-12.5); g.closePath(); g.fill(); bOut(g,1.3);
+      g.strokeStyle='#2C241D'; g.lineWidth=4.8; // 대형 활대(외곽)
+      g.beginPath(); g.moveTo(9.4,-24.8); g.quadraticCurveTo(16.8,-16, 9.4,-7.2); g.stroke();
+      g.strokeStyle='#A16024'; g.lineWidth=2.6; // 활대 목재
+      g.beginPath(); g.moveTo(9.4,-24.8); g.quadraticCurveTo(16.8,-16, 9.4,-7.2); g.stroke();
+      g.fillStyle='#5B7589'; g.beginPath(); g.arc(-1,-13.5,2,0,7); g.fill(); bOut(g,1.2); // 피벗
+      g.fillStyle=C.c; g.beginPath();
+      if(g.roundRect) g.roundRect(-10.5,-7.8,21,3.2,1.5); else g.rect(-10.5,-7.8,21,3.2); g.fill(); bOut(g,1.4);
+      g.fillStyle='#774019'; g.beginPath();
+      if(g.roundRect) g.roundRect(-11.5,-4.8,23,4.2,1.5); else g.rect(-11.5,-4.8,23,4.2); g.fill(); bOut(g,1.5);
+      for(const wx of [-7.5,7.5]){
+        g.fillStyle='#5B7589'; g.beginPath(); g.arc(wx,-1.2,3.6,0,7); g.fill();
+        g.strokeStyle='#2B2B2A'; g.lineWidth=1.5; g.stroke();
+        g.fillStyle='#E4E4E4'; g.beginPath(); g.arc(wx,-1.2,1.4,0,7); g.fill();
+        g.strokeStyle='#1D556E'; g.lineWidth=1; g.stroke(); }
+      break; }
+    case 'trebuchet':{ // ← 유저 SVG: A프레임 트레뷰셋 — 긴 팔 + 평형추 주머니 + 슬링돌
+      g.strokeStyle='#774019'; g.lineWidth=3; g.lineCap='round'; // 가파른 A프레임
+      g.beginPath(); g.moveTo(-6,-7.5); g.lineTo(-1.8,-22.5); g.moveTo(3,-7.5); g.lineTo(-1.8,-22.5); g.stroke();
+      g.lineCap='butt';
+      g.fillStyle='#A16024'; g.beginPath(); // 평형추 주머니(짧은 팔 아래)
+      g.moveTo(-11.8,-19.4); g.lineTo(-7,-19.4); g.lineTo(-5.6,-12.4);
+      g.quadraticCurveTo(-9.4,-10.6,-13.2,-12.4); g.closePath(); g.fill(); bOut(g,1.5);
+      g.save(); g.translate(-1.8,-22.5); g.rotate(-.32); // 긴 팔
+      g.fillStyle='#A16024'; g.beginPath();
+      if(g.roundRect) g.roundRect(-9.5,-1.6,25,3.2,1.5); else g.rect(-9.5,-1.6,25,3.2); g.fill(); bOut(g,1.4);
+      g.restore();
+      g.strokeStyle='#2C241D'; g.lineWidth=1.2; // 슬링 로프
+      g.beginPath(); g.moveTo(12.9,-27); g.lineTo(15,-20.8); g.stroke();
+      g.fillStyle='#AFAFAF'; g.beginPath(); // 슬링 돌 파우치
+      g.moveTo(13,-20.6); g.lineTo(16.8,-20.6); g.lineTo(17.6,-16.9);
+      g.quadraticCurveTo(15,-15.6,12.2,-16.9); g.closePath(); g.fill(); bOut(g,1.3);
+      g.fillStyle='#5B7589'; g.beginPath(); g.arc(-1.8,-22.5,2.2,0,7); g.fill(); bOut(g,1.2); // 피벗
+      g.fillStyle=C.c; g.beginPath();
+      if(g.roundRect) g.roundRect(-10.5,-7.8,21,3.2,1.5); else g.rect(-10.5,-7.8,21,3.2); g.fill(); bOut(g,1.4);
+      g.fillStyle='#774019'; g.beginPath();
+      if(g.roundRect) g.roundRect(-11.5,-4.8,23,4.2,1.5); else g.rect(-11.5,-4.8,23,4.2); g.fill(); bOut(g,1.5);
+      for(const wx of [-7.5,7.5]){
+        g.fillStyle='#5B7589'; g.beginPath(); g.arc(wx,-1.2,3.6,0,7); g.fill();
+        g.strokeStyle='#2B2B2A'; g.lineWidth=1.5; g.stroke();
+        g.fillStyle='#E4E4E4'; g.beginPath(); g.arc(wx,-1.2,1.4,0,7); g.fill();
+        g.strokeStyle='#1D556E'; g.lineWidth=1; g.stroke(); }
       break; }
     /* ═══════════ AGENT-BEAR-RIGS-START ═══════════ */
     case 'knight': case 'cuirassier': case 'dragoon': { // 치비 말(팀색 마갑) 공용 뼈대 + 유닛별 상체
@@ -5973,9 +6087,14 @@ function drawBearUnit(g,era,uIdx,C){
       g.fill(); bOut(g,1.7);
       g.strokeStyle=BEAR.woodLt; g.lineWidth=2;
       g.beginPath(); g.moveTo(-13,-3.6); g.lineTo(13,-3.6); g.stroke();
-      g.fillStyle=BEAR.steelDk; g.beginPath(); // saddle cradle for pivot
-      if(g.roundRect) g.roundRect(-6,-11,12,5.4,1.4); else g.rect(-6,-11,12,5.4);
+      g.save(); g.translate(0,-8.6); g.rotate(-.34); // 포신 앙각에 맞춘 경사 크래들
+      g.fillStyle=BEAR.steelDk; g.beginPath();
+      if(g.roundRect) g.roundRect(-7,-2.6,14,5.6,1.6); else g.rect(-7,-2.6,14,5.6);
       g.fill(); bOut(g,1.5);
+      g.restore();
+      g.fillStyle=BEAR.wood; g.beginPath(); // 전방 받침목(초크)
+      if(g.roundRect) g.roundRect(4.6,-9.6,4.4,3.6,1.2); else g.rect(4.6,-9.6,4.4,3.6);
+      g.fill(); bOut(g,1.3);
       g.strokeStyle='#8a6a44'; g.lineWidth=1.3; // rope lashings
       for(const rx of [-9,-3,3,9]){ g.beginPath(); g.moveTo(rx,-6.6); g.lineTo(rx-1.2,-1.6); g.stroke(); }
       bearHeadC(g,-10,-11.5,5); // bear holding torch
@@ -6071,6 +6190,9 @@ function drawUnit(u,time){
   ctx.rotate(wob);
   const flip=Math.cos(u.faceAng??.5)<0;
   blitSprite(unitSprite(u.era,u.uIdx,u.color,flip));
+  if(u.hitT>0){ ctx.save(); ctx.globalCompositeOperation='lighter';
+    ctx.globalAlpha=Math.min(1,u.hitT*5.5)*.75;
+    blitSprite(unitSprite(u.era,u.uIdx,u.color,flip)); ctx.restore(); }
   const vd=VDYN[id];
   if(vd){
     const dirH=flip?-1:1;
@@ -6113,6 +6235,21 @@ function unitIcon(era,uIdx,color){
   const k=.78;
   g.drawImage(s.c,28-(s.w*k)/2,44-s.ay*k,s.w*k,s.h*k);
   return cv;
+}
+
+function drawBHit(b){ // 건물 피격 글로우 — 가산 합성 소프트 플래시
+  const G=curG(); if(!G)return;
+  const sz=b.kind==='hq'?2:1;
+  const [fx,fy]=w2s(b.x+sz/2,b.y+sz/2);
+  const rz=tileRaise(G,b.x,b.y);
+  const hgt=(b.kind==='block'?(b.layers?b.layers.length:1)*13
+            :b.kind==='tower'?30:b.kind==='hq'?34:18)*cam.zoom;
+  ctx.save(); ctx.globalCompositeOperation='lighter';
+  ctx.globalAlpha=Math.min(1,b.hitT*4.5)*.42;
+  ctx.fillStyle='rgba(255,208,140,1)';
+  ctx.beginPath();
+  ctx.ellipse(fx,fy-rz*cam.zoom-hgt*.5,TW/2*sz*cam.zoom*.52,hgt*.52+TH/2*cam.zoom*.4,0,0,7);
+  ctx.fill(); ctx.restore();
 }
 
 function drawBuildGhost(){
