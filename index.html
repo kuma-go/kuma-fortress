@@ -417,6 +417,57 @@ const ERAS = [
   ]},
 ];
 
+/* ===================== 병종 상성 (COMBAT COUNTER SYSTEM) =====================
+   유닛에게 주는 피해는 [공격자 공격타입 × 대상 방어등급] 배수로 보정된다.
+   건물/성벽은 기존 mw/mb 배수를 그대로 쓰며, 이 상성은 유닛 대 유닛에만 적용된다.
+   모든 수치는 아래 ATK_MATRIX 한 곳에서 조정할 수 있다. */
+const ATK_TYPE = {
+  // blade 참격 — 근접 베기: 경보병에 강, 장갑·기갑에 약
+  sword:'blade', shield:'blade', knight:'blade', cuirassier:'blade', ram:'blade', oil:'blade',
+  // pierce 관통 — 화살·가벼운 볼트: 무갑 보병을 도륙, 판금엔 튕김
+  archer:'pierce', crossbow:'pierce', arrow:'pierce',
+  // spear 장창 — 창·파이크: 기병·중장갑 카운터
+  spearman:'spear', pikeman:'spear',
+  // bullet 총격 — 화기: 관통력으로 중장갑을 뚫도록 설계
+  musketeer:'bullet', dragoon:'bullet', machineGunner:'bullet', sniperUnit:'bullet',
+  medic:'bullet', apc:'bullet', commando:'bullet', rifle:'bullet', gatlingGun:'bullet',
+  musket:'bullet', gatling:'bullet', mg:'bullet', sniper:'bullet', tesla:'bullet',
+  // siege 폭발 — 폭발물·중포탄: 기갑·구조물 파괴
+  ballista:'siege', catapult:'siege', trebuchet:'siege', siegegun:'siege',
+  fieldcannon:'siege', mortarUnit:'siege', bombard:'siege', grenadier:'siege',
+  rocket:'siege', tank:'siege', howitzer:'siege', sapper:'siege', c4:'siege',
+  cannon:'siege', mortar:'siege', arty:'siege',
+};
+const ARM_CLASS = {
+  // light 경보병 — 목록에 없는 모든 유닛의 기본값 (무갑 보병)
+  // heavy 중장갑 — 판금 보병·기병
+  shield:'heavy', knight:'heavy', cuirassier:'heavy',
+  // vehicle 기갑 — 기계·공성 병기
+  ram:'vehicle', ballista:'vehicle', catapult:'vehicle', trebuchet:'vehicle',
+  siegegun:'vehicle', fieldcannon:'vehicle', mortarUnit:'vehicle', bombard:'vehicle',
+  tank:'vehicle', apc:'vehicle', howitzer:'vehicle',
+};
+const ATK_MATRIX = { //  공격타입 → { 방어등급 : 피해배수 }
+  blade:  { light:1.25, heavy:0.70, vehicle:0.55 },
+  pierce: { light:1.35, heavy:0.65, vehicle:0.50 },
+  spear:  { light:1.00, heavy:1.60, vehicle:0.75 },
+  bullet: { light:1.15, heavy:2.20, vehicle:0.70 },
+  siege:  { light:0.80, heavy:1.25, vehicle:1.75 },
+};
+const TYPE_KO={blade:'참격',pierce:'관통',spear:'장창',bullet:'총격',siege:'폭발'};
+const ARM_KO ={light:'경보병',heavy:'중장갑',vehicle:'기갑'};
+function typeMult(atk, arm){
+  const row = atk && ATK_MATRIX[atk]; if(!row) return 1;
+  const m = row[arm||'light']; return m==null ? 1 : m;
+}
+// 모든 유닛·타워 def에 공격타입/방어등급을 1회 각인 (전투 코드가 이 def를 공유)
+for(const E of ERAS){
+  for(const u of E.units ){ u.atk=ATK_TYPE[u.id]||'blade';  u.arm=ARM_CLASS[u.id]||'light'; }
+  for(const t of E.towers){ t.atk=ATK_TYPE[t.id]||'pierce'; }
+}
+// 카이팅 후퇴 속도 계수 — 전진보다 느리게 뒷걸음질 → 근접이 결국 따라잡음
+const KITE_SPD=0.7;
+
 /* budgets per tier: [build gold, garrison budget, attack budget vs this tier] */
 const TIERS = [
   {build:1600, garrison:450,  attack:950},
@@ -3441,6 +3492,25 @@ function nearestAttacker(x,y,minR,maxR){
     const dd=dist(x,y,a.x,a.y); if(dd<bd&&dd>=(minR||0)){bd=dd;best=a;} }
   return best;
 }
+/* Utility-based target picker — scores foes by proximity, counter-matchup,
+   woundedness (focus fire) and melee threat, with hysteresis on the current
+   target so units commit instead of flip-flopping. Used by both sides. */
+function bestEnemyUnit(u, arr, rad, current){
+  let best=null, bestS=-1e9;
+  for(const e of arr){ if(e.hp<=0) continue;
+    const d=dist(u.x,u.y,e.x,e.y); if(d>rad) continue;
+    const my=typeMult(u.def.atk, e.def.arm);     // how hard I hit them
+    const their=typeMult(e.def.atk, u.def.arm);   // how hard they hit me
+    let s = 4.0/(0.8+d);                          // proximity — a closer foe is decisively better
+    s += (my-1)*1.0;                              // 상성: favour targets I counter
+    s -= (their-1)*0.8;                           // 상성: avoid targets that counter me
+    s += (1-(e.hp/(e.maxHp||e.hp)))*1.3;          // 집중사격: strongly prefer the wounded
+    if(e.def.rng<1.6 && d<2.2) s += 0.7;          // 위협: a melee foe pressing me
+    if(e===current) s += 0.3;                     // light hysteresis: block jitter, still switch on real gains
+    if(s>bestS){ bestS=s; best=e; }
+  }
+  return best;
+}
 function applySeparation(dt){
   // gentle crowd separation so armies hold formation instead of stacking
   const all=[];
@@ -3562,7 +3632,9 @@ function damageBuilding(b,amt){
     if(b.kind==='wall'||b.kind==='block'||b.kind==='gate'||b.kind==='tower') collapseCheck(Battle.G,b.x,b.y);
   }
 }
-function damageUnit(u,amt,srcX,srcY,heavy){ if(u.hp<=0)return; u.hp-=amt; u.hitT=.16;
+function damageUnit(u,amt,srcX,srcY,heavy,atk){ if(u.hp<=0)return;
+  if(atk&&u.def) amt*=typeMult(atk,u.def.arm); // 병종 상성 배수
+  u.hp-=amt; u.hitT=.16;
   if(amt>=24||u.hp<=0) floatText(u.x,u.y,'-'+Math.round(amt),u.hp<=0?'#ff8a70':'#ffe090');
   if(u.hp<=0){ u.hp=0;
     if(heavy&&srcX!==undefined&&Battle.parts.length<880){
@@ -3650,12 +3722,12 @@ function splashAt(x,y,rad,dmg,vsAttackers,srcDef){
     for(const a of Battle.attackers){ if(a.hp<=0)continue;
       const d=dist(x,y,a.x,a.y); if(d<=rad){
         a.suppression=Math.max(a.suppression||0,SUPPRESS.duration*(1-d/rad*.35));
-        damageUnit(a, dmg*(1-d/rad*.5), x, y, true); knockback(a,x,y,rad,d); } }
+        damageUnit(a, dmg*(1-d/rad*.5), x, y, true, srcDef&&srcDef.atk); knockback(a,x,y,rad,d); } }
   } else {
     for(const dfn of Battle.defenders){ if(dfn.hp<=0)continue;
       const d=dist(x,y,dfn.x,dfn.y); if(d<=rad){
         dfn.suppression=Math.max(dfn.suppression||0,SUPPRESS.duration*(1-d/rad*.35));
-        damageUnit(dfn, dmg*(1-d/rad*.5), x, y, true); knockback(dfn,x,y,rad,d); } }
+        damageUnit(dfn, dmg*(1-d/rad*.5), x, y, true, srcDef&&srcDef.atk); knockback(dfn,x,y,rad,d); } }
     const seen=new Set();
     const r=Math.ceil(rad);
     for(let dy=-r;dy<=r;dy++)for(let dx=-r;dx<=r;dx++){
@@ -3703,7 +3775,7 @@ function fireProjectile(fromX,fromY,fromH,target,def,vsAttackers,type){
           const dd=dist(last.x,last.y,a.x,a.y); if(dd<bd){bd=dd;nb=a;} }
         if(!nb)break; victims.push(nb); last=nb; } }
     let px=fromX, py=fromY;
-    for(const v of victims){ damageUnit(v, def.dmg);
+    for(const v of victims){ damageUnit(v, def.dmg, undefined,undefined,false, def.atk);
       Battle.zaps.push({x1:px,y1:py,x2:v.x,y2:v.y,life:.4}); px=v.x; py=v.y; }
     AudioSys.play('zap'); return;
   }
@@ -3756,7 +3828,7 @@ function resolveBallImpact(p){
     return true;
   }
   if(victim){ // plows through infantry
-    damageUnit(victim,dmg,p.sx,p.sy,true);
+    damageUnit(victim,dmg,p.sx,p.sy,true, p.def&&p.def.atk);
     Battle.parts.push({x:p.tx,y:p.ty,h:.15,vx:0,vy:0,vh:0,kind:'flash',color:'rgba(255,230,160,.9)',life:.12,maxLife:.12,size:4});
     if(p.spl>0) splashAt(p.tx,p.ty,Math.max(p.spl,.5),dmg*.5,p.vsAttackers,p.def);
     AudioSys.play('hit');
@@ -3811,10 +3883,19 @@ function simStep(dt){
     const lab=Battle.mode==='lab';
     u.aggroCd=Math.max(0,(u.aggroCd||0)-dt);
     if(u.interim&&u.interim.unit&&u.interim.unit.hp<=0) u.interim=null;
+    // 헛된 추격 포기: locked foe has fled past our engage leash → let go, return to objective
+    const chaseLeash=lab?1e9:Math.max(u.def.rng,0.6)+3.2;
+    if(u.interim&&u.interim.unit&&dist(u.x,u.y,u.interim.unit.x,u.interim.unit.y)>chaseLeash)
+      u.interim=null;
     if(u.aggroCd<=0&&(!u.def.suicide||lab)){
       u.aggroCd=.22+Math.random()*.14; // throttled aggro scan (perf: O(n²) -> O(n²/13))
-      const foe=nearestDefender(u,lab?1e9:Math.max(3.2,(u.def.rng||0)+0.8));
-      if(foe&&(lab||u.def.pref!=='wall')) u.interim={unit:foe};
+      if(lab||u.def.pref!=='wall'){
+        const scanR=lab?1e9:Math.max(3.2,(u.def.rng||0)+1.0);
+        const cur=u.interim&&u.interim.unit&&u.interim.unit.hp>0?u.interim.unit:null;
+        const foe=bestEnemyUnit(u, Battle.defenders, scanR, cur); // smart pick (상성·집중사격·위협)
+        if(foe) u.interim={unit:foe};
+        else if(!(cur&&dist(u.x,u.y,cur.x,cur.y)<=chaseLeash)) u.interim=u.interim&&u.interim.unit?null:u.interim;
+      }
     }
     if(u.def.heal){
       const ally=nearestWoundedAlly(u,Battle.attackers,u.def.healRng||2.5);
@@ -3832,6 +3913,28 @@ function simStep(dt){
               u.interim&&u.interim.b&&!u.interim.b.dead?u.interim.b:u.target;
     const isB=!!tgt.kind;
     const [tx,ty]=isB?buildingCenter(tgt):[tgt.x,tgt.y];
+    // --- KITING: ranged units backpedal from a closing melee threat, firing as they go ---
+    if(u.def.proj && u.def.rng>1.6 && !u.def.suicide){
+      const threat=nearestDefender(u, u.def.rng);
+      if(threat && threat.def.rng<1.6 && dist(u.x,u.y,threat.x,threat.y) < Math.min(u.def.rng-0.3, 3.0)){
+        const thd=dist(u.x,u.y,threat.x,threat.y);
+        u.faceAng=Math.atan2((threat.y-u.y),(threat.x-u.x)*1.6);
+        u.cd-=dt; // keep firing at the chaser
+        if(u.cd<=0 && thd<=u.def.rng){ u.cd=u.def.rate; if(u.suppression>0)u.cd*=SUPPRESS.reload; u.flash=.12;
+          fireProjectile(u.x,u.y,.14,threat,{dmg:u.def.dmg,spl:u.def.spl,mw:u.def.mw,mb:u.def.mb,projSpeed:u.def.projSpeed,spread:u.def.spread,atk:u.def.atk},false,u.def.proj); }
+        const ka=Math.atan2(u.y-threat.y,u.x-threat.x); // step directly away
+        const hb=G.bgrid[(u.y|0)*MAPW+(u.x|0)];
+        let ktc=(hb&&hb.kind==='bridgeB')?1:(WALK_COST[G.terrain[(u.y|0)*MAPW+(u.x|0)]]||1);
+        if(hb&&hb.kind==='moat') ktc+=2.2;
+        const ksp=u.def.spd/ktc*(u.slow>0?.5:1)*(u.suppression>0?SUPPRESS.speed:1)*KITE_SPD;
+        const knx=clamp(u.x+Math.cos(ka)*ksp*dt,0.2,MAPW-0.2), kny=clamp(u.y+Math.sin(ka)*ksp*dt,0.2,MAPW-0.2);
+        const kb=G.bgrid[(kny|0)*MAPW+(knx|0)];
+        if(WALK_COST[G.terrain[(kny|0)*MAPW+(knx|0)]]>0 && (!kb||PASSIVE[kb.kind])){
+          u.vx=Math.cos(ka)*ksp; u.vy=Math.sin(ka)*ksp; u.x=knx; u.y=kny; u.moving=true;
+        } else { u.moving=false; u.vx=0; u.vy=0; } // cornered: hold ground and keep firing
+        continue;
+      }
+    }
     const reach=(isB?(tgt.kind==='hq'?1.15:0.75):0.45)+Math.max(u.def.rng,0.55);
     const dd=dist(u.x,u.y,tx,ty);
     if(dd<=reach){
@@ -3845,13 +3948,13 @@ function simStep(dt){
       if(u.cd<=0){ u.cd=u.def.rate;
         if(u.suppression>0) u.cd*=SUPPRESS.reload;
         if(u.def.proj&&u.def.rng>1.2){ u.flash=.12;
-          fireProjectile(u.x,u.y,.14,tgt,{dmg:u.def.dmg, spl:u.def.spl, mw:u.def.mw, mb:u.def.mb, projSpeed:u.def.projSpeed, spread:u.def.spread}, false, u.def.proj); }
+          fireProjectile(u.x,u.y,.14,tgt,{dmg:u.def.dmg, spl:u.def.spl, mw:u.def.mw, mb:u.def.mb, projSpeed:u.def.projSpeed, spread:u.def.spread, atk:u.def.atk}, false, u.def.proj); }
         else {
           u.atkT=.22; // melee swing
           if(Battle.parts.length<880) Battle.parts.push({kind:'slash',x:tx,y:ty,h:.5,
             ang:Math.atan2(ty-u.y,(tx-u.x)*1.6),vx:0,vy:0,vh:0,life:.17,maxLife:.17,size:7});
           if(isB) damageBuilding(tgt, u.def.dmg*(WALLISH[tgt.kind]?u.def.mw:u.def.mb));
-          else damageUnit(tgt, u.def.dmg);
+          else damageUnit(tgt, u.def.dmg, undefined,undefined,false, u.def.atk);
           if(u.def.spl>0) splashAt(tx,ty,u.def.spl,u.def.dmg*.5,false,u.def);
           AudioSys.play('hit');
         }
@@ -3921,13 +4024,41 @@ function simStep(dt){
         continue;
       }
     }
-    if((!d.target||d.target.hp<=0)&&d.rtCd<=0){
+    if(d.rtCd<=0){
       d.rtCd=.22+Math.random()*.14;
-      d.target=nearestAttacker(d.x,d.y,0,engageR); if(d.target)d.path=null; }
+      const cur=d.target&&d.target.hp>0?d.target:null;
+      const foe=bestEnemyUnit(d, Battle.attackers, engageR, cur); // smart pick + focus fire
+      if(foe){ if(foe!==d.target){ d.target=foe; d.path=null; } } // repath only on real switch
+      else if(!cur) d.target=null;
+    }
     if(d.target&&d.target.hp<=0)d.target=null;
     if(d.target) raiseAlarm(d.target.x,d.target.y);
     let destX=null,destY=null;
     const rng=Math.max(d.def.rng,0.55);
+    // --- KITING (defenders): ranged skirmishers fall back from melee, staying near their post ---
+    if(d.def.proj && d.def.rng>1.6){
+      const leash=(Battle.mode==='lab')?1e9:4.0;
+      const threat=nearestAttacker(d.x,d.y,0,d.def.rng);
+      if(threat && threat.def.rng<1.6 && dist(d.x,d.y,threat.x,threat.y) < Math.min(d.def.rng-0.3, 3.0)
+         && dist(d.x,d.y,d.hx,d.hy) < leash){
+        const thd=dist(d.x,d.y,threat.x,threat.y);
+        d.faceAng=Math.atan2((threat.y-d.y),(threat.x-d.x)*1.6);
+        d.cd-=dt;
+        if(d.cd<=0 && thd<=d.def.rng){ d.cd=Math.max(d.def.rate,.3); if(d.suppression>0)d.cd*=SUPPRESS.reload; d.flash=.12;
+          fireProjectile(d.x,d.y,.14,threat,{dmg:d.def.dmg,spl:d.def.spl,projSpeed:d.def.projSpeed,spread:d.def.spread,atk:d.def.atk},true,d.def.proj); }
+        const ka=Math.atan2(d.y-threat.y,d.x-threat.x);
+        const hb=Battle.G.bgrid[(d.y|0)*MAPW+(d.x|0)];
+        let ktc=(hb&&hb.kind==='bridgeB')?1:(WALK_COST[Battle.G.terrain[(d.y|0)*MAPW+(d.x|0)]]||1);
+        if(hb&&hb.kind==='moat') ktc+=2.2;
+        const ksp=d.def.spd/ktc*(d.suppression>0?SUPPRESS.speed:1)*KITE_SPD;
+        const knx=clamp(d.x+Math.cos(ka)*ksp*dt,0.2,MAPW-0.2), kny=clamp(d.y+Math.sin(ka)*ksp*dt,0.2,MAPW-0.2);
+        const kb=Battle.G.bgrid[(kny|0)*MAPW+(knx|0)];
+        if(WALK_COST[Battle.G.terrain[(kny|0)*MAPW+(knx|0)]]>0 && (!kb||PASSIVE[kb.kind]||kb.kind==='gate')){
+          d.vx=Math.cos(ka)*ksp; d.vy=Math.sin(ka)*ksp; d.x=knx; d.y=kny; d.moving=true; d.path=null;
+        } else { d.moving=false; d.vx=0; d.vy=0; }
+        continue;
+      }
+    }
     if(d.target){
       const dd=dist(d.x,d.y,d.target.x,d.target.y);
       if(dd<=rng+0.3){
@@ -3936,11 +4067,11 @@ function simStep(dt){
         if(d.cd<=0){ d.cd=Math.max(d.def.rate,.3);
           if(d.suppression>0) d.cd*=SUPPRESS.reload;
           if(d.def.proj&&d.def.rng>1.2){ d.flash=.12;
-            fireProjectile(d.x,d.y,.14,d.target,{dmg:d.def.dmg,spl:d.def.spl,projSpeed:d.def.projSpeed,spread:d.def.spread},true,d.def.proj); }
+            fireProjectile(d.x,d.y,.14,d.target,{dmg:d.def.dmg,spl:d.def.spl,projSpeed:d.def.projSpeed,spread:d.def.spread,atk:d.def.atk},true,d.def.proj); }
           else { d.atkT=.22;
             if(Battle.parts.length<880) Battle.parts.push({kind:'slash',x:d.target.x,y:d.target.y,h:.5,
               ang:Math.atan2(d.target.y-d.y,(d.target.x-d.x)*1.6),vx:0,vy:0,vh:0,life:.17,maxLife:.17,size:7});
-            damageUnit(d.target,d.def.dmg); AudioSys.play('hit'); } }
+            damageUnit(d.target,d.def.dmg, undefined,undefined,false, d.def.atk); AudioSys.play('hit'); } }
         continue;
       }
       destX=d.target.x; destY=d.target.y;
@@ -4039,7 +4170,7 @@ function simStep(dt){
       if(k>=1){ p.hit=true;
         if(alive){
           if(t.kind) damageBuilding(t, p.dmg*(WALLISH[t.kind]?(p.def.mw||1):(p.def.mb||1)));
-          else damageUnit(t,p.dmg);
+          else damageUnit(t,p.dmg, undefined,undefined,false, p.def&&p.def.atk);
           AudioSys.play('hit'); } }
     } else {
       if(p.ballArc){
@@ -4067,7 +4198,7 @@ function simStep(dt){
         if(p.spl>0){ splashAt(p.tx,p.ty,p.spl,p.dmg,p.vsAttackers,p.def); AudioSys.play('boom'); }
         else if(alive){
           if(t.kind) damageBuilding(t, p.dmg*(WALLISH[t.kind]?(p.def.mw||1):(p.def.mb||1)));
-          else damageUnit(t,p.dmg);
+          else damageUnit(t,p.dmg, undefined,undefined,false, p.def&&p.def.atk);
           Battle.parts.push({x:p.tx,y:p.ty,h:.2,vx:0,vy:0,vh:0,kind:'flash',
             color:'rgba(255,230,160,.9)',life:.12,maxLife:.12,size:4});
           AudioSys.play('hit'); } }
@@ -4336,6 +4467,7 @@ function statLine(d,isUnit){
   const s=[];
   if(isUnit){ s.push(STR.statHp+' '+d.hp, STR.statDmg+' '+(d.suicide?d.dmg+'💥':d.dmg),
     STR.statSpeed+' '+d.spd); if(d.rng>1.2)s.push(STR.statRange+' '+d.rng);
+    if(d.atk)s.push('공격:'+(TYPE_KO[d.atk]||d.atk)); if(d.arm&&d.arm!=='light')s.push('방어:'+(ARM_KO[d.arm]||d.arm));
     if(d.heal)s.push('회복 '+d.heal);
     if(d.spl)s.push(STR.statSplash+' '+d.spl);
     if(d.mw>1.5)s.push(STR.vsWall+' ×'+d.mw); if(d.mb>1.2)s.push(STR.vsBld+' ×'+d.mb);
