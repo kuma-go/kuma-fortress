@@ -632,47 +632,97 @@ addEventListener('keydown',e=>{ const c=BIND[e.code]; if(c){Input.keys.add(c);e.
   if(e.code==='Space'&&Battle.active){Battle.paused=!Battle.paused;e.preventDefault();updateHud();} });
 addEventListener('keyup',e=>{ const c=BIND[e.code]; if(c)Input.keys.delete(c); });
 
+function clampCam(){ const lim=MAPW*TW/2;
+  cam.x=clamp(cam.x,-lim,lim); cam.y=clamp(cam.y,-TH*4,MAPW*TH+TH*4); }
+
 let pstart=null, pinch=null;
+// --- multi-touch gesture guards ---
+// touchGesture: true while 2+ fingers are down (pan/zoom mode) → suppress build/pan-by-single-pointer
+// gestureCooldown: after a gesture ends, ignore stray pointer events until this time (ms)
+// pendingPaint: on touch, the first-finger build is deferred so a second finger (pinch) can cancel it
+let touchGesture=false, gestureCooldown=0, pendingPaint=null;
+const inGesture=()=> touchGesture || performance.now()<gestureCooldown;
+
 canvas.addEventListener('pointerdown',e=>{ canvas.setPointerCapture(e.pointerId);
   AudioSys.ensure();
+  if(inGesture()) return; // part of / right after a multi-touch gesture → ignore for build
   Input.pointer.down=true; Input.pointer.button=e.button; Input.pointer.dragging=false;
   pstart={x:e.clientX,y:e.clientY,cx:cam.x,cy:cam.y,id:e.pointerId};
   Input.gestureTiles.clear(); // new gesture, fresh tile ledger
-  if(e.button===0&&Input.onDragPaint){ Input.onDragPaint(e.clientX,e.clientY,true); }
+  if(e.button===0&&Input.onDragPaint){
+    if(e.pointerType==='touch'){
+      // defer the initial placement; a second finger arriving cancels it (see startGesture)
+      pendingPaint={x:e.clientX,y:e.clientY};
+    } else {
+      Input.onDragPaint(e.clientX,e.clientY,true);
+    }
+  }
 });
 canvas.addEventListener('pointermove',e=>{
   Input.pointer.x=e.clientX; Input.pointer.y=e.clientY;
   if(Input.onHover) Input.onHover(e.clientX,e.clientY);
+  if(touchGesture) return; // two-finger pan/zoom handled by touch* listeners
   if(!Input.pointer.down||!pstart) return;
   const dx=e.clientX-pstart.x, dy=e.clientY-pstart.y;
   if(!Input.pointer.dragging && Math.hypot(dx,dy)>9) Input.pointer.dragging=true;
   if(Input.pointer.dragging){
-    if(Input.pointer.button===0 && Input.onDragPaint){ Input.onDragPaint(e.clientX,e.clientY,false); }
-    else { cam.x=pstart.cx-dx/cam.zoom; cam.y=pstart.cy-dy/cam.zoom; }
+    if(Input.pointer.button===0 && Input.onDragPaint){
+      if(pendingPaint){ Input.onDragPaint(pendingPaint.x,pendingPaint.y,true); pendingPaint=null; }
+      Input.onDragPaint(e.clientX,e.clientY,false);
+    }
+    else { cam.x=pstart.cx-dx/cam.zoom; cam.y=pstart.cy-dy/cam.zoom; clampCam(); }
   }
 });
 canvas.addEventListener('pointerup',e=>{
+  // flush a deferred single-tap placement (touch) only if no gesture happened
+  if(pendingPaint && !inGesture()){ Input.onDragPaint(pendingPaint.x,pendingPaint.y,true); }
+  pendingPaint=null;
   // when a drag-paint handler exists, pointerdown already acted — never double-fire via tap
-  if(Input.pointer.down && !Input.pointer.dragging && Input.onTap && e.button===0 && !Input.onDragPaint)
+  if(Input.pointer.down && !Input.pointer.dragging && Input.onTap && e.button===0 && !Input.onDragPaint && !inGesture())
     Input.onTap(e.clientX,e.clientY);
   Input.pointer.down=false; Input.pointer.dragging=false; pstart=null;
 });
+canvas.addEventListener('pointercancel',()=>{ pendingPaint=null; Input.pointer.down=false; Input.pointer.dragging=false; pstart=null; });
 canvas.addEventListener('contextmenu',e=>e.preventDefault());
 canvas.addEventListener('wheel',e=>{ e.preventDefault();
   const z=clamp(cam.zoom*(e.deltaY<0?1.12:0.89),0.45,2.6);
   cam.zoom=z; },{passive:false});
-// touch pinch
-canvas.addEventListener('touchstart',e=>{ if(e.touches.length===2){
-  pinch={d:Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY),z:cam.zoom}; }},{passive:true});
-canvas.addEventListener('touchmove',e=>{ if(e.touches.length===2&&pinch){
-  const d=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);
-  cam.zoom=clamp(pinch.z*d/pinch.d,0.45,2.6); e.preventDefault(); }},{passive:false});
-canvas.addEventListener('touchend',()=>pinch=null);
+
+// --- two-finger pan + pinch zoom ---
+const touchMid=(a,b)=>({x:(a.clientX+b.clientX)/2, y:(a.clientY+b.clientY)/2});
+function startGesture(e){
+  const a=e.touches[0], b=e.touches[1], m=touchMid(a,b);
+  pinch={ d:Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY), z:cam.zoom,
+          mx:m.x, my:m.y, cx:cam.x, cy:cam.y };
+  touchGesture=true;
+  // abort any single-finger build/pan that a first touch may have begun
+  pendingPaint=null; Input.pointer.down=false; Input.pointer.dragging=false; pstart=null;
+}
+canvas.addEventListener('touchstart',e=>{ if(e.touches.length>=2) startGesture(e); },{passive:false});
+canvas.addEventListener('touchmove',e=>{ if(e.touches.length>=2 && pinch){
+  const a=e.touches[0], b=e.touches[1], m=touchMid(a,b);
+  const d=Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY);
+  const nz=clamp(pinch.z*d/pinch.d,0.45,2.6);
+  // world point under the baseline centroid stays anchored → combined pan (centroid move) + zoom-to-focus
+  const Wx=(pinch.mx-VW/2)/pinch.z+pinch.cx, Wy=(pinch.my-VH/2)/pinch.z+pinch.cy;
+  cam.zoom=nz;
+  cam.x=Wx-(m.x-VW/2)/nz; cam.y=Wy-(m.y-VH/2)/nz;
+  clampCam(); e.preventDefault(); }},{passive:false});
+canvas.addEventListener('touchend',e=>{
+  if(e.touches.length>=2){ startGesture(e); return; } // e.g. 3→2 fingers: re-baseline
+  pinch=null;
+  if(e.touches.length===0){ if(touchGesture) gestureCooldown=performance.now()+220; touchGesture=false; }
+  else { touchGesture=true; gestureCooldown=performance.now()+220; } // one finger left over → stay locked
+});
+canvas.addEventListener('touchcancel',e=>{
+  pinch=null;
+  if(e.touches.length===0){ if(touchGesture) gestureCooldown=performance.now()+220; touchGesture=false; }
+});
+
 function panByKeys(dt){ const s=520*dt/cam.zoom;
   if(Input.keys.has('up'))cam.y-=s; if(Input.keys.has('down'))cam.y+=s;
   if(Input.keys.has('left'))cam.x-=s; if(Input.keys.has('right'))cam.x+=s;
-  const lim=MAPW*TW/2;
-  cam.x=clamp(cam.x,-lim,lim); cam.y=clamp(cam.y,-TH*4,MAPW*TH+TH*4); }
+  clampCam(); }
 
 /* ===================== A* PATHFINDING ===================== */
 // grid cost: terrain walk cost; wall tiles passable with penalty (units will attack through)
